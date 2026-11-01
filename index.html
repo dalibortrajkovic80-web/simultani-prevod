@@ -150,6 +150,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
       <option value="ru">Ruski</option>
     </select>
     <p class="note">Jezik predavača se prepoznaje sam.</p>
+    <label class="chk"><input type="checkbox" id="speaker"><span><b>Bez slušalica</b>: glas prevoda ide kroz zvučnik telefona. Dok prevod govori, mikrofon se ne šalje na prevod, da se prevod ne bi vrteo u krug; zato se tada deo govora preskoči. Snimak originala ide i dalje. Za predavanje koristite slušalice i ostavite ovo isključeno.</span></label>
     <label class="chk"><input type="checkbox" id="nsup"><span>Obrada zvuka sa mikrofona (smanjenje šuma i automatska jačina). Isključite ako je snimak originala previše „obrađen”.</span></label>
     <div class="row" style="margin-top:18px"><button class="btn primary" id="saveSettings">Sačuvaj</button></div>
   </div>
@@ -171,7 +172,7 @@ const ROTATE_FORCE = 9.5 * 60 * 1000;
 const $ = s => document.querySelector(s);
 
 /* ---------- podešavanja ---------- */
-const S = Object.assign({ key: '', lang: 'sr', voice: true, showSrc: true, fs: 26, nsup: true, variant: 0 },
+const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, nsup: true, variant: 0 },
   (() => { try { return JSON.parse(localStorage.getItem('sp.settings')) || {}; } catch { return {}; } })());
 function saveS() { try { localStorage.setItem('sp.settings', JSON.stringify(S)); } catch {} }
 
@@ -271,6 +272,10 @@ class Segmenter {
   constructor(kind) { this.kind = kind; this.cur = null; this.list = []; }
   add(text) {
     if (!text) return;
+    // ista rečenica poslata ponovo (npr. zbog odjeka): ne dodaj je još jednom
+    const norm = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (norm.length >= 12 && norm === this.lastNorm) return;
+    if (norm) this.lastNorm = norm;
     const t = now();
     if (!this.cur) {
       this.cur = { t0: t, t1: t, text: '' };
@@ -298,6 +303,25 @@ class Segmenter {
   tick() { if (this.cur && now() - this.cur.t1 > 2500) this.end(); }
 }
 let segSrc = new Segmenter('src'), segDst = new Segmenter('dst');
+
+/* ---------- dijagnostika: tekstualne poruke servera (bez zvuka), za proveru grešaka ---------- */
+let audioMsgs = 0;
+function diagNote(text) { if (sess) persist('segs', { sid: sess.id, kind: 'diag', t0: Math.round(now()), t1: 0, text }); }
+function diag(j) {
+  const sc = j.serverContent || {};
+  const parts = sc.modelTurn && sc.modelTurn.parts || [];
+  const audio = parts.filter(p => p.inlineData).length;
+  audioMsgs += audio;
+  const rest = Object.assign({}, j); delete rest.usageMetadata;
+  if (rest.serverContent) {
+    const c = Object.assign({}, rest.serverContent);
+    if (c.modelTurn) c.modelTurn = '[zvuk ×' + audio + ']';
+    rest.serverContent = c;
+  }
+  const keys = Object.keys(rest.serverContent || {});
+  if (keys.length === 1 && keys[0] === 'modelTurn' && Object.keys(rest).length === 1) return;  // samo zvuk
+  diagNote(JSON.stringify(rest) + ' (zvučnih poruka do sada: ' + audioMsgs + ')');
+}
 
 /* ---------- veza sa Gemini Live (model za prevod) ---------- */
 function setupMsg(v) {
@@ -335,6 +359,7 @@ class Conn {
       this.onReady(this);
     }
     const sc = j.serverContent;
+    diag(j);
     if (sc) {
       if (sc.inputTranscription && sc.inputTranscription.text) segSrc.add(sc.inputTranscription.text);
       if (sc.outputTranscription && sc.outputTranscription.text) segDst.add(sc.outputTranscription.text);
@@ -347,6 +372,7 @@ class Conn {
   closed(e) {
     if (this.closedByUs) return;
     const reason = (e.reason || '').trim();
+    diagNote('close ' + e.code + ' ' + reason);
     // Neprihvaćen oblik podešavanja: probaj sledeći oblik iste poruke
     if (!this.ready && e.code === 1007 && this.variant < 2 && !/key/i.test(reason)) {
       this.variant++; this.connect(); return;
@@ -419,6 +445,8 @@ function onPcm(buf) {
   if (rms > Math.max(0.015, noise * 2.5)) lastLoud = performance.now();
   $('#meter i').style.width = Math.min(100, rms * 400) + '%';
   if (fatal) return;
+  // bez slušalica: dok glas prevoda svira kroz zvučnik, modelu šaljemo tišinu, da ne prevodi sopstveni glas
+  if (S.speaker && S.voice && outCtx && nextT > outCtx.currentTime - 0.3) buf = new ArrayBuffer(buf.byteLength);
   const b64 = b64FromBuf(buf);
   if (active && active.ready) active.send(b64);
   else { pending.push(b64); if (pending.length > 300) pending.shift(); }   // čuva do 30 s dok se veza vraća
@@ -521,6 +549,9 @@ async function start(file) {
   state = 'running'; fatal = false; retryN = 0; pending = []; active = null; rotating = false;
   document.body.classList.add('running');
   $('#go').textContent = 'Završi'; $('#go').disabled = false;
+  audioMsgs = 0;
+  diagNote('start: ' + navigator.userAgent + ' | inCtx ' + inCtx.sampleRate + ' Hz | ' + JSON.stringify({ voice: S.voice, speaker: S.speaker, nsup: S.nsup, lang: S.lang, file: !!file }));
+  if (S.voice && !S.speaker && !file) toast('Glas prevoda slušajte na slušalicama. Bez slušalica uključite „Bez slušalica” u Podešavanjima.', 7000);
   keepAwake();
   connect();
   tickTimer = setInterval(tick, 250);
@@ -623,6 +654,10 @@ async function renderRecs() {
     add('Prevod (tekst)', async () => download(s.title + ' - prevod.txt', txt(await textFile(s, 'dst'))));
     add('Original (tekst)', async () => download(s.title + ' - original tekst.txt', txt(await textFile(s, 'src'))));
     add('Titlovi (.srt)', async () => download(s.title + ' - prevod.srt', txt(await srtFile(s))));
+    add('Dijagnostika', async () => {
+      const d = (await DB.by('segs', [s.id, 'diag'])).sort((a, b) => a.t0 - b.t0);
+      download(s.title + ' - dijagnostika.txt', txt(d.map(g => '[' + hms(g.t0, 1) + '] ' + g.text).join('\n') + '\n'));
+    });
     if (!(sess && sess.id === s.id)) add('Obriši', async () => {
       if (!confirm('Trajno obrisati „' + s.title + '” iz telefona? Preuzeti fajlovi ostaju.')) return;
       await DB.del(s.id); renderRecs();
@@ -646,7 +681,7 @@ $('#fontbtn').onclick = () => { const z = [20, 23, 26, 30, 34, 40]; S.fs = z[(z.
 $('#menubtn').onclick = () => $('#dlgMenu').showModal();
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 function openSettings() {
-  $('#key').value = S.key; $('#lang').value = S.lang; $('#nsup').checked = S.nsup;
+  $('#key').value = S.key; $('#lang').value = S.lang; $('#nsup').checked = S.nsup; $('#speaker').checked = S.speaker;
   $('#dlgMenu').close(); $('#dlgSettings').showModal();
 }
 $('#openSettings').onclick = openSettings;
@@ -654,7 +689,7 @@ $('#showKey').onclick = () => { const k = $('#key'); k.type = k.type === 'passwo
 $('#saveSettings').onclick = () => {
   const k = $('#key').value.trim();
   if (k !== S.key) S.variant = 0;
-  S.key = k; S.lang = $('#lang').value; S.nsup = $('#nsup').checked; saveS();
+  S.key = k; S.lang = $('#lang').value; S.nsup = $('#nsup').checked; S.speaker = $('#speaker').checked; saveS();
   $('#dlgSettings').close(); toast('Sačuvano', 1500);
 };
 $('#openRecs').onclick = () => { $('#dlgMenu').close(); $('#dlgRecs').showModal(); renderRecs(); };
