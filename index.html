@@ -101,7 +101,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     Sve se istovremeno snima: <b>originalni zvuk</b>, <b>glas prevoda</b> i <b>tekst</b> (sa vremenom).
     Snimke preuzimate posle u meniju <b>Snimci</b>.<br><br>
     Ekran ostaje upaljen dok traje prevod. Ne zaključavajte telefon i ne prelazite u drugu aplikaciju.<br><br>
-    <span style="font-size:13px">Verzija 3 (zaštita od odjeka)</span>
+    <span style="font-size:13px">Verzija 4 (izbor glasa)</span>
   </div>
   <div id="segs"></div>
 </main>
@@ -119,7 +119,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 </footer>
 
 <dialog id="dlgMenu">
-  <div class="dh"><h2>Meni <span class="note">· verzija 3</span></h2><button data-close>×</button></div>
+  <div class="dh"><h2>Meni <span class="note">· verzija 4</span></h2><button data-close>×</button></div>
   <div class="db">
     <div class="row" style="flex-wrap:wrap">
       <button class="btn primary" id="openRecs">Snimci</button>
@@ -151,6 +151,24 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
       <option value="ru">Ruski</option>
     </select>
     <p class="note">Jezik predavača se prepoznaje sam.</p>
+    <label for="tts">Glas prevoda u slušalicama</label>
+    <select id="tts">
+      <option value="model">Google (oponaša glas predavača)</option>
+      <option value="phone">Glas telefona (biram ja)</option>
+    </select>
+    <div id="phoneVoice">
+      <label for="ttsVoice">Glas telefona</label>
+      <select id="ttsVoice"></select>
+      <label for="ttsRate">Brzina govora</label>
+      <select id="ttsRate">
+        <option value="0.95">Sporije</option>
+        <option value="1.05">Normalno</option>
+        <option value="1.15">Brže</option>
+        <option value="1.25">Najbrže</option>
+      </select>
+      <div class="row" style="margin-top:10px"><button class="btn" id="ttsTest">▶ Probaj glas</button></div>
+      <p class="note" id="ttsNote">Telefon čita srpski tekst prevoda, rečenicu po rečenicu, pa kasni sekundu-dve više od Google-ovog glasa. Google-ov glas se i dalje snima („Prevod (glas)”).</p>
+    </div>
     <label class="chk"><input type="checkbox" id="speaker"><span><b>Bez slušalica</b>: glas prevoda ide kroz zvučnik telefona. Dok prevod govori, mikrofon se ne šalje na prevod, da se prevod ne bi vrteo u krug; zato se tada deo govora preskoči. Snimak originala ide i dalje. Za predavanje koristite slušalice i ostavite ovo isključeno.</span></label>
     <label class="chk"><input type="checkbox" id="nsup"><span>Obrada zvuka sa mikrofona (smanjenje šuma i automatska jačina). Isključite ako je snimak originala previše „obrađen”.</span></label>
     <div class="row" style="margin-top:18px"><button class="btn primary" id="saveSettings">Sačuvaj</button></div>
@@ -173,7 +191,8 @@ const ROTATE_FORCE = 9.5 * 60 * 1000;
 const $ = s => document.querySelector(s);
 
 /* ---------- podešavanja ---------- */
-const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, nsup: true, variant: 0 },
+const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, nsup: true, variant: 0,
+  tts: 'model', ttsVoice: '', ttsRate: 1.05 },
   (() => { try { return JSON.parse(localStorage.getItem('sp.settings')) || {}; } catch { return {}; } })());
 function saveS() { try { localStorage.setItem('sp.settings', JSON.stringify(S)); } catch {} }
 
@@ -289,11 +308,12 @@ class Segmenter {
       }
     }
     this.cur.text += text; this.cur.t1 = t;
-    if (this.kind === 'dst') { this.cur.el.querySelector('p').textContent = this.cur.text.trim(); scrollDown(); }
+    if (this.kind === 'dst') { this.cur.el.querySelector('p').textContent = this.cur.text.trim(); scrollDown(); TTS.feed(text); }
     else { srcAll = (srcAll + text).slice(-600); $('#srctext').textContent = srcAll.trim(); }
     if (this.cur.text.length > 240 && /[.!?…]["”»']?\s*$/.test(this.cur.text)) this.end();
   }
   end() {
+    if (this.kind === 'dst') TTS.flush();
     const c = this.cur; if (!c) return; this.cur = null;
     const text = c.text.replace(/\s+/g, ' ').trim();
     if (c.el) { c.el.classList.remove('live'); if (!text) c.el.remove(); }
@@ -304,6 +324,61 @@ class Segmenter {
   tick() { if (this.cur && now() - this.cur.t1 > 2500) this.end(); }
 }
 let segSrc = new Segmenter('src'), segDst = new Segmenter('dst');
+
+/* ---------- glas telefona: čita srpski tekst prevoda, rečenicu po rečenicu ---------- */
+const LAT = 'abvgdđežzijklmnoprstćufhcčš', CYR = 'абвгдђежзијклмнопрстћуфхцчш';
+const DIGR = { lj: 'љ', Lj: 'Љ', LJ: 'Љ', nj: 'њ', Nj: 'Њ', NJ: 'Њ', 'dž': 'џ', 'Dž': 'Џ', 'DŽ': 'Џ' };
+function toCyr(s) {
+  s = s.replace(/LJ|Lj|lj|NJ|Nj|nj|DŽ|Dž|dž/g, m => DIGR[m]);
+  let o = '';
+  for (const ch of s) {
+    const lo = ch.toLowerCase(), i = LAT.indexOf(lo);
+    o += i < 0 ? ch : (ch === lo ? CYR[i] : CYR[i].toUpperCase());
+  }
+  return o;
+}
+function srVoices() {
+  if (!('speechSynthesis' in window)) return [];
+  return speechSynthesis.getVoices().filter(v => /^(sr|hr|bs)/i.test(v.lang));
+}
+function pickVoice() {
+  const vs = srVoices();
+  return vs.find(v => v.voiceURI === S.ttsVoice) || vs.find(v => /^sr/i.test(v.lang)) || vs[0] || null;
+}
+const TTS = {
+  buf: '', q: 0,
+  on() { return S.voice && S.tts === 'phone' && 'speechSynthesis' in window; },
+  feed(text) {
+    if (!this.on()) return;
+    this.buf += text;
+    let m;
+    while ((m = this.buf.match(/^([\s\S]*?[.!?…:;])(\s+|$)/)) && m[0].length) {
+      this.say(m[1]); this.buf = this.buf.slice(m[0].length);
+    }
+    if (this.buf.length > 160) {            // duga rečenica bez tačke: čitaj do zareza
+      const i = this.buf.lastIndexOf(',');
+      if (i > 40) { this.say(this.buf.slice(0, i + 1)); this.buf = this.buf.slice(i + 1); }
+    }
+  },
+  flush() { if (this.on() && this.buf.trim()) this.say(this.buf); this.buf = ''; },
+  say(t, force) {
+    t = t.trim(); if (!t) return;
+    if (this.q > 4 && !force) return;        // glas mnogo zaostaje: preskoči rečenicu (tekst ostaje na ekranu)
+    try {   // greška u govoru telefona nikad ne sme da prekine prikaz teksta
+      const v = pickVoice();
+      const u = new SpeechSynthesisUtterance(!v || /^sr/i.test(v.lang) ? toCyr(t) : t);
+      if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'sr-RS';
+      u.rate = S.ttsRate * (this.q >= 2 ? 1.15 : 1);
+      u.onend = u.onerror = () => { this.q = Math.max(0, this.q - 1); lastOut = performance.now(); };
+      speechSynthesis.speak(u);
+      this.q++;
+    } catch (e) {
+      if (!this.warned) { this.warned = true; toast('Glas telefona ne radi: ' + e.message); }
+    }
+  },
+  busy() { return 'speechSynthesis' in window && (speechSynthesis.speaking || this.q > 0); },
+  stop() { try { speechSynthesis.cancel(); } catch {} this.buf = ''; this.q = 0; }
+};
 
 /* ---------- dijagnostika: tekstualne poruke servera (bez zvuka), za proveru grešaka ---------- */
 let audioMsgs = 0;
@@ -447,7 +522,8 @@ function onPcm(buf) {
   $('#meter i').style.width = Math.min(100, rms * 400) + '%';
   if (fatal) return;
   // bez slušalica: dok glas prevoda svira kroz zvučnik, modelu šaljemo tišinu, da ne prevodi sopstveni glas
-  if (S.speaker && S.voice && outCtx && nextT > outCtx.currentTime - 0.3) buf = new ArrayBuffer(buf.byteLength);
+  const talking = S.tts === 'phone' ? TTS.busy() : (outCtx && nextT > outCtx.currentTime - 0.3);
+  if (S.speaker && S.voice && talking) buf = new ArrayBuffer(buf.byteLength);
   const b64 = b64FromBuf(buf);
   if (active && active.ready) active.send(b64);
   else { pending.push(b64); if (pending.length > 300) pending.shift(); }   // čuva do 30 s dok se veza vraća
@@ -510,7 +586,9 @@ async function start(file) {
   if (state !== 'idle') return;
   if (!S.key) { toast('Prvo unesite Gemini API ključ.'); openSettings(); return; }
   state = 'starting'; $('#go').disabled = true; status('Pokrećem…', 'warn');
-  // AudioContext pravimo odmah, dok važi dodir korisnika
+  // AudioContext i govor telefona pokrećemo odmah, dok važi dodir korisnika
+  TTS.stop();
+  if (S.tts === 'phone' && 'speechSynthesis' in window) speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
   inCtx = new AudioContext({ sampleRate: 16000 });
   outCtx = new AudioContext({ sampleRate: 24000 });
   try {
@@ -527,7 +605,7 @@ async function start(file) {
   const mute = inCtx.createGain(); mute.gain.value = 0;
   src.connect(worklet); worklet.connect(mute); mute.connect(inCtx.destination);
 
-  outGain = outCtx.createGain(); outGain.gain.value = S.voice ? 1 : 0; outGain.connect(outCtx.destination);
+  outGain = outCtx.createGain(); outGain.gain.value = S.voice && S.tts === 'model' ? 1 : 0; outGain.connect(outCtx.destination);
   const dest = outCtx.createMediaStreamDestination();
   recBus = outCtx.createGain(); recBus.connect(dest);
   nextT = 0;
@@ -585,7 +663,8 @@ async function stop() {
   const until = performance.now() + 10000;
   lastOut = Math.max(lastOut, performance.now());
   while (performance.now() < until) {
-    const playing = outCtx && nextT > outCtx.currentTime;
+    if (performance.now() - lastOut > 1500) segDst.end();   // izgovori i poslednji deo rečenice
+    const playing = (outCtx && nextT > outCtx.currentTime) || (TTS.on() && TTS.busy());
     if (!playing && performance.now() - lastOut > 2500) break;
     await sleep(250);
   }
@@ -598,6 +677,7 @@ async function stop() {
   await persist('sessions', sess);
   await Promise.all([...writes]);
   await cleanupAudio();
+  TTS.stop();
   try { wakeLock && wakeLock.release(); } catch {} wakeLock = null;
   state = 'idle'; document.body.classList.remove('running');
   $('#go').textContent = 'Počni'; $('#go').disabled = false; $('#meter i').style.width = '0';
@@ -673,7 +753,8 @@ function applyUI() {
   document.body.classList.toggle('nosrc', !S.showSrc);
   $('#srcbtn').classList.toggle('off', !S.showSrc);
   $('#voice').classList.toggle('off', !S.voice);
-  if (outGain) outGain.gain.value = S.voice ? 1 : 0;
+  if (outGain) outGain.gain.value = S.voice && S.tts === 'model' ? 1 : 0;
+  if (!S.voice) TTS.stop();
 }
 $('#go').onclick = () => state === 'running' ? stop() : start();
 $('#voice').onclick = () => { S.voice = !S.voice; saveS(); applyUI(); toast(S.voice ? 'Glas prevoda uključen' : 'Glas prevoda isključen (i dalje se snima)', 2000); };
@@ -683,6 +764,7 @@ $('#menubtn').onclick = () => $('#dlgMenu').showModal();
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 function openSettings() {
   $('#key').value = S.key; $('#lang').value = S.lang; $('#nsup').checked = S.nsup; $('#speaker').checked = S.speaker;
+  $('#tts').value = S.tts; $('#ttsRate').value = String(S.ttsRate); fillVoices(); showPhoneVoice();
   $('#dlgMenu').close(); $('#dlgSettings').showModal();
 }
 $('#openSettings').onclick = openSettings;
@@ -690,10 +772,39 @@ $('#showKey').onclick = () => { const k = $('#key'); k.type = k.type === 'passwo
 $('#saveSettings').onclick = () => {
   const k = $('#key').value.trim();
   if (k !== S.key) S.variant = 0;
-  S.key = k; S.lang = $('#lang').value; S.nsup = $('#nsup').checked; S.speaker = $('#speaker').checked; saveS();
+  S.key = k; S.lang = $('#lang').value; S.nsup = $('#nsup').checked; S.speaker = $('#speaker').checked;
+  S.tts = $('#tts').value; S.ttsVoice = $('#ttsVoice').value; S.ttsRate = parseFloat($('#ttsRate').value) || 1.05;
+  saveS(); applyUI();
   $('#dlgSettings').close(); toast('Sačuvano', 1500);
 };
-$('#openRecs').onclick = () => { $('#dlgMenu').close(); $('#dlgRecs').showModal(); renderRecs(); };
+function fillVoices() {
+  const sel = $('#ttsVoice'), vs = srVoices();
+  sel.innerHTML = '';
+  for (const v of vs) {
+    const o = document.createElement('option');
+    o.value = v.voiceURI; o.textContent = v.name + ' (' + v.lang + ')';
+    sel.appendChild(o);
+  }
+  const p = pickVoice(); if (p) sel.value = p.voiceURI;
+  $('#ttsNote').style.display = '';
+  if (!vs.length) {
+    const o = document.createElement('option'); o.value = ''; o.textContent = 'Nema srpskog glasa u telefonu'; sel.appendChild(o);
+  }
+  $('#noVoice') && $('#noVoice').remove();
+  if (!vs.length) $('#ttsNote').insertAdjacentHTML('beforebegin', '<p class="note" id="noVoice" style="color:var(--warn)">Telefon nema srpski glas. Podešavanja telefona → Opšte upravljanje → Pretvaranje teksta u govor: izaberite Google kao mašinu, pa u njenim podešavanjima instalirajte srpski (Install voice data → Srpski). Zatim ponovo otvorite aplikaciju.</p>');
+}
+function showPhoneVoice() { $('#phoneVoice').style.display = $('#tts').value === 'phone' ? '' : 'none'; }
+$('#tts').onchange = () => { showPhoneVoice(); fillVoices(); };
+if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { if ($('#dlgSettings').open) fillVoices(); };
+$('#ttsTest').onclick = () => {
+  if (!('speechSynthesis' in window)) return toast('Ovaj pregledač ne podržava glas telefona.');
+  const keep = { v: S.ttsVoice, r: S.ttsRate };
+  S.ttsVoice = $('#ttsVoice').value; S.ttsRate = parseFloat($('#ttsRate').value) || 1.05;
+  speechSynthesis.cancel(); TTS.q = 0;
+  TTS.say('Dobro veče. Ovako zvuči glas prevoda: U početku stvori Bog nebo i zemlju.', true);
+  S.ttsVoice = keep.v; S.ttsRate = keep.r;
+};
+$('#openRecs').onclick =() => { $('#dlgMenu').close(); $('#dlgRecs').showModal(); renderRecs(); };
 $('#openFile').onclick = () => { if (state !== 'idle') return toast('Prvo završite tekući prevod.'); $('#fileIn').click(); };
 $('#fileIn').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) { $('#dlgMenu').close(); start(f); } };
 
