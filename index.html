@@ -101,7 +101,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     Sve se istovremeno snima: <b>originalni zvuk</b>, <b>glas prevoda</b> i <b>tekst</b> (sa vremenom).
     Snimke preuzimate posle u meniju <b>Snimci</b>.<br><br>
     Ekran ostaje upaljen dok traje prevod. Ne zaključavajte telefon i ne prelazite u drugu aplikaciju.<br><br>
-    <span style="font-size:13px">Verzija 4 (izbor glasa)</span>
+    <span style="font-size:13px">Verzija 5 (Gemini ženski glas)</span>
   </div>
   <div id="segs"></div>
 </main>
@@ -119,7 +119,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 </footer>
 
 <dialog id="dlgMenu">
-  <div class="dh"><h2>Meni <span class="note">· verzija 4</span></h2><button data-close>×</button></div>
+  <div class="dh"><h2>Meni <span class="note">· verzija 5</span></h2><button data-close>×</button></div>
   <div class="db">
     <div class="row" style="flex-wrap:wrap">
       <button class="btn primary" id="openRecs">Snimci</button>
@@ -154,8 +154,15 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     <label for="tts">Glas prevoda u slušalicama</label>
     <select id="tts">
       <option value="model">Google (oponaša glas predavača)</option>
+      <option value="gemini">Gemini, ženski glas (proba)</option>
       <option value="phone">Glas telefona (biram ja)</option>
     </select>
+    <div id="geminiVoice">
+      <label for="gVoice">Gemini glas</label>
+      <select id="gVoice"></select>
+      <div class="row" style="margin-top:10px"><button class="btn" id="gTest">▶ Probaj glas</button></div>
+      <p class="note">Ovde prevodi opšti Gemini model po uputstvu „samo prevodi” (biblijski navodi po Daničić–Karadžiću, srpski oblici imena). Glas biramo mi, ali model ponekad sačeka pauzu u govoru ili zastane. Probajte ga pre pravog predavanja. Proba glasa troši par sekundi vašeg Gemini ključa.</p>
+    </div>
     <div id="phoneVoice">
       <label for="ttsVoice">Glas telefona</label>
       <select id="ttsVoice"></select>
@@ -185,6 +192,24 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 <script>
 'use strict';
 const MODEL = 'gemini-3.5-live-translate-preview';
+const MODEL_G = 'gemini-3.8-live';          // opšti Live model: bira se glas, prevodi po uputstvu
+const LANG_NAMES = { sr: 'Serbian (Latin script)', hr: 'Croatian', mk: 'Macedonian (Cyrillic script)', sl: 'Slovenian', en: 'English', de: 'German', ru: 'Russian' };
+function sysPrompt() {
+  const L = LANG_NAMES[S.lang] || S.lang;
+  return [
+    'You are a professional simultaneous interpreter at a live Christian (Seventh-day Adventist) Bible lecture.',
+    'Translate everything the speaker says into ' + L + '. Speak ONLY the translation, in the first person, as the speaker would say it.',
+    'Never answer questions, never comment, never greet, never explain, never summarize, never say that you are translating. If the speaker asks the audience a question, just translate the question.',
+    'Translate faithfully and completely, sentence by sentence; do not skip content and do not add anything.',
+    S.lang === 'sr' ? 'When the speaker quotes the Bible, use the wording of the Serbian Daničić–Karadžić Bible in the ekavian form if you recognize the verse. Use the traditional Serbian forms of biblical names and books (Mojsije, Isus Navin, Pavle, Jevanđelje po Jovanu, Rimljanima…).' : '',
+    'If the audio is silent, unclear, music, or not speech, say nothing.',
+    'Keep the speaker\'s tone and emphasis, speak naturally and keep pace with the speaker.'
+  ].filter(Boolean).join('\n');
+}
+// ženski glasovi iz Gemini-jevog spiska (ime – Google-ov opis)
+const G_VOICES = [['Sulafat', 'topao'], ['Aoede', 'lagan, prozračan'], ['Kore', 'čvrst, siguran'], ['Achernar', 'mek'],
+  ['Vindemiatrix', 'blag'], ['Despina', 'gladak'], ['Erinome', 'jasan'], ['Gacrux', 'zreo'], ['Leda', 'mladalački'],
+  ['Zephyr', 'svetao'], ['Autonoe', 'svetao'], ['Callirrhoe', 'opušten'], ['Laomedeia', 'živahan'], ['Pulcherrima', 'odlučan']];
 const WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=';
 const ROTATE_AFTER = 8 * 60 * 1000;     // veza traje oko 10 min; menjamo je ranije, u pauzi govora
 const ROTATE_FORCE = 9.5 * 60 * 1000;
@@ -192,7 +217,7 @@ const $ = s => document.querySelector(s);
 
 /* ---------- podešavanja ---------- */
 const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, nsup: true, variant: 0,
-  tts: 'model', ttsVoice: '', ttsRate: 1.05 },
+  tts: 'model', ttsVoice: '', ttsRate: 1.05, gVoice: 'Sulafat', gvariant: 0 },
   (() => { try { return JSON.parse(localStorage.getItem('sp.settings')) || {}; } catch { return {}; } })());
 function saveS() { try { localStorage.setItem('sp.settings', JSON.stringify(S)); } catch {} }
 
@@ -269,6 +294,7 @@ const extOf = mime => /mp4/.test(mime) ? 'm4a' : /ogg/.test(mime) ? 'ogg' : 'web
 
 /* ---------- stanje ---------- */
 let state = 'idle';          // idle | starting | running | stopping
+let mode = 'translate';      // translate (model za prevod) | gemini (opšti Live model sa izabranim glasom)
 let sess = null, t0 = 0;     // t0 = performance.now() na početku snimanja
 let stream = null, fileEl = null, inCtx = null, outCtx = null, worklet = null;
 let outGain = null, recBus = null, nextT = 0, lastOut = 0;
@@ -400,7 +426,21 @@ function diag(j) {
 }
 
 /* ---------- veza sa Gemini Live (model za prevod) ---------- */
+function setupMsgG(v) {
+  const s = {
+    model: 'models/' + MODEL_G,
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: S.gVoice } } } },
+    systemInstruction: { parts: [{ text: sysPrompt() }] },
+    // predavač govori i dok prevod traje: prevod se ne sme prekidati
+    realtimeInputConfig: { activityHandling: 'NO_INTERRUPTION', automaticActivityDetection: { silenceDurationMs: 600 } },
+    contextWindowCompression: { slidingWindow: {} }
+  };
+  if (v === 0) { s.inputAudioTranscription = {}; s.outputAudioTranscription = {}; }
+  else { s.generationConfig.inputAudioTranscription = {}; s.generationConfig.outputAudioTranscription = {}; }
+  return { setup: s };
+}
 function setupMsg(v) {
+  if (mode === 'gemini') return setupMsgG(v);
   const tc = { targetLanguageCode: S.lang, echoTargetLanguage: false };
   const model = 'models/' + MODEL;
   if (v === 0) return { setup: { model, generationConfig: { responseModalities: ['AUDIO'], inputAudioTranscription: {}, outputAudioTranscription: {}, translationConfig: tc } } };
@@ -411,7 +451,8 @@ function setupMsg(v) {
 class Conn {
   constructor(onReady) {
     this.onReady = onReady; this.ready = false; this.closedByUs = false; this.opened = performance.now();
-    this.variant = S.variant || 0;
+    this.variant = (mode === 'gemini' ? S.gvariant : S.variant) || 0;
+    this.maxVariant = mode === 'gemini' ? 1 : 2;
     this.connect();
   }
   connect() {
@@ -431,7 +472,8 @@ class Conn {
     try { j = JSON.parse(typeof data === 'string' ? data : new TextDecoder().decode(data)); } catch { return; }
     if (j.setupComplete && !this.ready) {
       this.ready = true; this.opened = performance.now();
-      if (S.variant !== this.variant) { S.variant = this.variant; saveS(); }
+      const vk = mode === 'gemini' ? 'gvariant' : 'variant';
+      if (S[vk] !== this.variant) { S[vk] = this.variant; saveS(); }
       this.onReady(this);
     }
     const sc = j.serverContent;
@@ -450,7 +492,7 @@ class Conn {
     const reason = (e.reason || '').trim();
     diagNote('close ' + e.code + ' ' + reason);
     // Neprihvaćen oblik podešavanja: probaj sledeći oblik iste poruke
-    if (!this.ready && e.code === 1007 && this.variant < 2 && !/key/i.test(reason)) {
+    if (!this.ready && e.code === 1007 && this.variant < this.maxVariant && !/key/i.test(reason)) {
       this.variant++; this.connect(); return;
     }
     if (this !== active && !this.pendingNext) return;
@@ -529,13 +571,17 @@ function onPcm(buf) {
   else { pending.push(b64); if (pending.length > 300) pending.shift(); }   // čuva do 30 s dok se veza vraća
 }
 
-function playPcm(b64) {
-  if (!outCtx) return;
+function pcmBuffer(ctx, b64) {
   const i16 = new Int16Array(bufFromB64(b64));
   const f = new Float32Array(i16.length);
   for (let i = 0; i < i16.length; i++) f[i] = i16[i] / 32768;
-  const buf = outCtx.createBuffer(1, f.length, 24000);
+  const buf = ctx.createBuffer(1, f.length, 24000);
   buf.copyToChannel(f, 0);
+  return buf;
+}
+function playPcm(b64) {
+  if (!outCtx) return;
+  const buf = pcmBuffer(outCtx, b64);
   const s = outCtx.createBufferSource(); s.buffer = buf;
   const t = outCtx.currentTime;
   if (nextT < t + 0.04) nextT = t + 0.04;
@@ -605,7 +651,7 @@ async function start(file) {
   const mute = inCtx.createGain(); mute.gain.value = 0;
   src.connect(worklet); worklet.connect(mute); mute.connect(inCtx.destination);
 
-  outGain = outCtx.createGain(); outGain.gain.value = S.voice && S.tts === 'model' ? 1 : 0; outGain.connect(outCtx.destination);
+  outGain = outCtx.createGain(); outGain.gain.value = S.voice && S.tts !== 'phone' ? 1 : 0; outGain.connect(outCtx.destination);
   const dest = outCtx.createMediaStreamDestination();
   recBus = outCtx.createGain(); recBus.connect(dest);
   nextT = 0;
@@ -626,10 +672,11 @@ async function start(file) {
   recTr = startRecorder(dest.stream, 'tr', 48000);
 
   state = 'running'; fatal = false; retryN = 0; pending = []; active = null; rotating = false;
+  mode = S.tts === 'gemini' ? 'gemini' : 'translate';
   document.body.classList.add('running');
   $('#go').textContent = 'Završi'; $('#go').disabled = false;
   audioMsgs = 0;
-  diagNote('start: ' + navigator.userAgent + ' | inCtx ' + inCtx.sampleRate + ' Hz | ' + JSON.stringify({ voice: S.voice, speaker: S.speaker, nsup: S.nsup, lang: S.lang, file: !!file }));
+  diagNote('start: ' + navigator.userAgent + ' | inCtx ' + inCtx.sampleRate + ' Hz | ' + JSON.stringify({ mode, tts: S.tts, gVoice: S.gVoice, voice: S.voice, speaker: S.speaker, nsup: S.nsup, lang: S.lang, file: !!file }));
   if (S.voice && !S.speaker && !file) toast('Glas prevoda slušajte na slušalicama. Bez slušalica uključite „Bez slušalica” u Podešavanjima.', 7000);
   keepAwake();
   connect();
@@ -753,7 +800,7 @@ function applyUI() {
   document.body.classList.toggle('nosrc', !S.showSrc);
   $('#srcbtn').classList.toggle('off', !S.showSrc);
   $('#voice').classList.toggle('off', !S.voice);
-  if (outGain) outGain.gain.value = S.voice && S.tts === 'model' ? 1 : 0;
+  if (outGain) outGain.gain.value = S.voice && S.tts !== 'phone' ? 1 : 0;
   if (!S.voice) TTS.stop();
 }
 $('#go').onclick = () => state === 'running' ? stop() : start();
@@ -765,6 +812,7 @@ document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.close
 function openSettings() {
   $('#key').value = S.key; $('#lang').value = S.lang; $('#nsup').checked = S.nsup; $('#speaker').checked = S.speaker;
   $('#tts').value = S.tts; $('#ttsRate').value = String(S.ttsRate); fillVoices(); showPhoneVoice();
+  $('#gVoice').value = S.gVoice;
   $('#dlgMenu').close(); $('#dlgSettings').showModal();
 }
 $('#openSettings').onclick = openSettings;
@@ -774,6 +822,7 @@ $('#saveSettings').onclick = () => {
   if (k !== S.key) S.variant = 0;
   S.key = k; S.lang = $('#lang').value; S.nsup = $('#nsup').checked; S.speaker = $('#speaker').checked;
   S.tts = $('#tts').value; S.ttsVoice = $('#ttsVoice').value; S.ttsRate = parseFloat($('#ttsRate').value) || 1.05;
+  S.gVoice = $('#gVoice').value || 'Sulafat';
   saveS(); applyUI();
   $('#dlgSettings').close(); toast('Sačuvano', 1500);
 };
@@ -793,7 +842,49 @@ function fillVoices() {
   $('#noVoice') && $('#noVoice').remove();
   if (!vs.length) $('#ttsNote').insertAdjacentHTML('beforebegin', '<p class="note" id="noVoice" style="color:var(--warn)">Telefon nema srpski glas. Podešavanja telefona → Opšte upravljanje → Pretvaranje teksta u govor: izaberite Google kao mašinu, pa u njenim podešavanjima instalirajte srpski (Install voice data → Srpski). Zatim ponovo otvorite aplikaciju.</p>');
 }
-function showPhoneVoice() { $('#phoneVoice').style.display = $('#tts').value === 'phone' ? '' : 'none'; }
+function showPhoneVoice() {
+  $('#phoneVoice').style.display = $('#tts').value === 'phone' ? '' : 'none';
+  $('#geminiVoice').style.display = $('#tts').value === 'gemini' ? '' : 'none';
+}
+for (const [n, d] of G_VOICES) {
+  const o = document.createElement('option'); o.value = n; o.textContent = n + ' – ' + d; $('#gVoice').appendChild(o);
+}
+// proba Gemini glasa: kratka veza koja samo pročita jednu rečenicu
+let gTestWs = null;
+$('#gTest').onclick = () => {
+  const key = $('#key').value.trim() || S.key;
+  if (!key) return toast('Prvo unesite API ključ.');
+  if (gTestWs) try { gTestWs.close(); } catch {}
+  const voice = $('#gVoice').value, btn = $('#gTest');
+  const ctx = new AudioContext({ sampleRate: 24000 });
+  let t = ctx.currentTime + 0.15;
+  const ws = gTestWs = new WebSocket(WS_URL + encodeURIComponent(key));
+  ws.binaryType = 'arraybuffer';
+  btn.disabled = true; btn.textContent = '… povezujem';
+  const done = () => { btn.disabled = false; btn.textContent = '▶ Probaj glas'; };
+  ws.onopen = () => ws.send(JSON.stringify({ setup: {
+    model: 'models/' + MODEL_G,
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
+    systemInstruction: { parts: [{ text: 'Read the user\'s text aloud in Serbian exactly as written. Say nothing else.' }] }
+  } }));
+  ws.onmessage = e => {
+    let j; try { j = JSON.parse(typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data)); } catch { return; }
+    if (j.setupComplete) {
+      btn.textContent = '… govori';
+      ws.send(JSON.stringify({ clientContent: { turns: [{ role: 'user', parts: [{ text: 'Dobro veče. Ovako zvuči glas prevoda. U početku stvori Bog nebo i zemlju.' }] }], turnComplete: true } }));
+    }
+    const parts = j.serverContent && j.serverContent.modelTurn && j.serverContent.modelTurn.parts || [];
+    for (const p of parts) if (p.inlineData && p.inlineData.data) {
+      const s = ctx.createBufferSource(); s.buffer = pcmBuffer(ctx, p.inlineData.data); s.connect(ctx.destination);
+      if (t < ctx.currentTime + 0.05) t = ctx.currentTime + 0.05;
+      s.start(t); t += s.buffer.duration;
+    }
+    if (j.serverContent && j.serverContent.turnComplete) {
+      setTimeout(() => { try { ws.close(1000); } catch {} ctx.close(); done(); }, Math.max(0, (t - ctx.currentTime) * 1000) + 300);
+    }
+  };
+  ws.onclose = e => { if (e.code !== 1000 && e.code !== 1005) toast('Proba glasa: ' + (e.reason || 'veza prekinuta (' + e.code + ')'), 8000); done(); };
+};
 $('#tts').onchange = () => { showPhoneVoice(); fillVoices(); };
 if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { if ($('#dlgSettings').open) fillVoices(); };
 $('#ttsTest').onclick = () => {
