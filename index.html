@@ -101,7 +101,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     Sve se istovremeno snima: <b>originalni zvuk</b>, <b>glas prevoda</b> i <b>tekst</b> (sa vremenom).
     Snimke preuzimate posle u meniju <b>Snimci</b>.<br><br>
     Ekran ostaje upaljen dok traje prevod. Ne zaključavajte telefon i ne prelazite u drugu aplikaciju.<br><br>
-    <span style="font-size:13px">Verzija 7 (provereno sa pravim prevodiocem)</span>
+    <span style="font-size:13px">Verzija 8 (izbor mikrofona)</span>
   </div>
   <div id="segs"></div>
 </main>
@@ -119,7 +119,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 </footer>
 
 <dialog id="dlgMenu">
-  <div class="dh"><h2>Meni <span class="note">· verzija 7</span></h2><button data-close>×</button></div>
+  <div class="dh"><h2>Meni <span class="note">· verzija 8</span></h2><button data-close>×</button></div>
   <div class="db">
     <div class="row" style="flex-wrap:wrap">
       <button class="btn primary" id="openRecs">Snimci</button>
@@ -177,6 +177,10 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
       <div class="row" style="margin-top:10px"><button class="btn" id="ttsTest">▶ Probaj glas</button></div>
       <p class="note" id="ttsNote">Telefon čita srpski tekst prevoda, rečenicu po rečenicu, pa kasni sekundu-dve više od Google-ovog glasa. Google-ov glas se i dalje snima („Prevod (glas)”).</p>
     </div>
+    <label for="mic">Mikrofon</label>
+    <select id="mic"></select>
+    <div class="row" style="margin-top:8px"><button class="btn" id="micRefresh">Osveži spisak mikrofona</button></div>
+    <p class="note" id="micNote">Spoljni mikrofon (npr. prijemnik RØDE Wireless GO II na USB-C) priključite pre otvaranja aplikacije, pa pritisnite „Osveži spisak”. Ako ga nema na spisku, telefon ga i dalje može koristiti sam: pri pokretanju piše koji mikrofon radi.</p>
     <label class="chk"><input type="checkbox" id="speaker"><span><b>Bez slušalica</b>: glas prevoda ide kroz zvučnik telefona. Dok prevod govori, mikrofon se ne šalje na prevod, da se prevod ne bi vrteo u krug; zato se tada deo govora preskoči. Snimak originala ide i dalje. Za predavanje koristite slušalice i ostavite ovo isključeno.</span></label>
     <label class="chk"><input type="checkbox" id="proc"><span><b>Telefonska obrada zvuka</b> (kao u pozivu: poništavanje odjeka i šuma). Za predavanje ostavite isključeno, jer ume da seče udaljeni glas. Uključite samo ako je govornik tik uz telefon u bučnoj prostoriji.</span></label>
     <div class="row" style="margin-top:18px"><button class="btn primary" id="saveSettings">Sačuvaj</button></div>
@@ -217,7 +221,7 @@ const ROTATE_FORCE = 9.5 * 60 * 1000;
 const $ = s => document.querySelector(s);
 
 /* ---------- podešavanja ---------- */
-const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, proc: false, variant: 1,
+const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, proc: false, variant: 1, mic: '', micLabel: '',
   tts: 'model', ttsVoice: '', ttsRate: 1.05, gVoice: 'Sulafat', gvariant: 0 },
   (() => { try { return JSON.parse(localStorage.getItem('sp.settings')) || {}; } catch { return {}; } })());
 function saveS() { try { localStorage.setItem('sp.settings', JSON.stringify(S)); } catch {} }
@@ -649,10 +653,13 @@ async function sourceStream(file) {
     if (!st.getAudioTracks().length) await new Promise(r => st.addEventListener('addtrack', r, { once: true }));
     return st;
   }
-  return navigator.mediaDevices.getUserMedia({
-    // bez telefonske obrade za razgovore: ona je za govor izbliza i seče udaljenog predavača
-    audio: { channelCount: 1, echoCancellation: S.proc, noiseSuppression: S.proc, autoGainControl: S.proc }
-  });
+  // bez telefonske obrade za razgovore: ona je za govor izbliza i seče udaljenog predavača
+  const audio = { channelCount: 1, echoCancellation: S.proc, noiseSuppression: S.proc, autoGainControl: S.proc };
+  if (S.mic) {
+    try { return await navigator.mediaDevices.getUserMedia({ audio: Object.assign({ deviceId: { exact: S.mic } }, audio) }); }
+    catch (e) { toast('Izabrani mikrofon („' + (S.micLabel || 'spoljni') + '”) nije priključen. Koristim mikrofon telefona.', 8000); }
+  }
+  return navigator.mediaDevices.getUserMedia({ audio });
 }
 
 function startRecorder(st, track, bps) {
@@ -726,6 +733,18 @@ async function start(file) {
   audioMsgs = 0;
   diagNote('start: ' + navigator.userAgent + ' | inCtx ' + inCtx.sampleRate + ' Hz | ' + JSON.stringify({ mode, tts: S.tts, gVoice: S.gVoice, voice: S.voice, speaker: S.speaker, proc: S.proc, lang: S.lang, file: !!file, track: stream.getAudioTracks()[0] && stream.getAudioTracks()[0].getSettings() }));
   if (S.voice && !S.speaker && !file) toast('Glas prevoda slušajte na slušalicama. Bez slušalica uključite „Bez slušalica” u Podešavanjima.', 7000);
+  const mt = stream.getAudioTracks()[0];
+  if (mt && !file) {
+    toast('Mikrofon: ' + (mt.label || 'mikrofon telefona'), 6000);
+    diagNote('mikrofon: ' + mt.label);
+    // bežični ili USB mikrofon može da se isključi usred predavanja: upozori odmah
+    mt.onended = () => {
+      if (state !== 'running') return;
+      status('Mikrofon isključen!', 'err');
+      toast('Mikrofon se isključio (' + (mt.label || 'mikrofon') + '). Pritisnite Završi, proverite vezu i ponovo Počni.', 15000);
+      diagNote('mikrofon se isključio');
+    };
+  }
   keepAwake();
   connect();
   tickTimer = setInterval(tick, 250);
@@ -861,14 +880,15 @@ function openSettings() {
   $('#key').value = S.key; $('#lang').value = S.lang; $('#proc').checked = S.proc; $('#speaker').checked = S.speaker;
   $('#tts').value = S.tts; $('#ttsRate').value = String(S.ttsRate); fillVoices(); showPhoneVoice();
   $('#gVoice').value = S.gVoice;
+  fillMics();
   $('#dlgMenu').close(); $('#dlgSettings').showModal();
 }
 $('#openSettings').onclick = openSettings;
 $('#showKey').onclick = () => { const k = $('#key'); k.type = k.type === 'password' ? 'text' : 'password'; };
 $('#saveSettings').onclick = () => {
   const k = $('#key').value.trim();
-  if (k !== S.key) S.variant = 0;
   S.key = k; S.lang = $('#lang').value; S.proc = $('#proc').checked; S.speaker = $('#speaker').checked;
+  S.mic = $('#mic').value; S.micLabel = S.mic ? $('#mic').selectedOptions[0].textContent : '';
   S.tts = $('#tts').value; S.ttsVoice = $('#ttsVoice').value; S.ttsRate = parseFloat($('#ttsRate').value) || 1.05;
   S.gVoice = $('#gVoice').value || 'Sulafat';
   saveS(); applyUI();
@@ -890,6 +910,27 @@ function fillVoices() {
   $('#noVoice') && $('#noVoice').remove();
   if (!vs.length) $('#ttsNote').insertAdjacentHTML('beforebegin', '<p class="note" id="noVoice" style="color:var(--warn)">Telefon nema srpski glas. Podešavanja telefona → Opšte upravljanje → Pretvaranje teksta u govor: izaberite Google kao mašinu, pa u njenim podešavanjima instalirajte srpski (Install voice data → Srpski). Zatim ponovo otvorite aplikaciju.</p>');
 }
+async function fillMics() {
+  const sel = $('#mic'); sel.innerHTML = '<option value="">Automatski (telefon bira)</option>';
+  let ds = [];
+  try { ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default'); } catch {}
+  for (const d of ds) {
+    const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || 'Mikrofon ' + (sel.options.length);
+    sel.appendChild(o);
+  }
+  if (S.mic && ![...sel.options].some(o => o.value === S.mic)) {
+    const o = document.createElement('option'); o.value = S.mic; o.textContent = (S.micLabel || 'Izabrani mikrofon') + ' (nije priključen)'; sel.appendChild(o);
+  }
+  sel.value = S.mic || '';
+  return ds;
+}
+$('#micRefresh').onclick = async () => {
+  // nazivi mikrofona se vide tek kad je mikrofon dozvoljen
+  try { const st = await navigator.mediaDevices.getUserMedia({ audio: true }); st.getTracks().forEach(t => t.stop()); }
+  catch (e) { return toast('Mikrofon nije dozvoljen: ' + e.message); }
+  const ds = await fillMics();
+  toast('Pronađeno mikrofona: ' + ds.length, 3000);
+};
 function showPhoneVoice() {
   $('#phoneVoice').style.display = $('#tts').value === 'phone' ? '' : 'none';
   $('#geminiVoice').style.display = $('#tts').value === 'gemini' ? '' : 'none';
