@@ -154,14 +154,15 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     <label for="tts">Glas prevoda u slušalicama</label>
     <select id="tts">
       <option value="model">Google (oponaša glas predavača)</option>
-      <option value="gemini">Gemini, ženski glas (proba)</option>
+      <option value="gemini">Gemini, ženski glas (nepouzdano)</option>
       <option value="phone">Glas telefona (biram ja)</option>
     </select>
     <div id="geminiVoice">
       <label for="gVoice">Gemini glas</label>
       <select id="gVoice"></select>
       <div class="row" style="margin-top:10px"><button class="btn" id="gTest">▶ Probaj glas</button></div>
-      <p class="note">Ovde prevodi opšti Gemini model po uputstvu „samo prevodi” (biblijski navodi po Daničić–Karadžiću, srpski oblici imena). Glas biramo mi, ali model ponekad sačeka pauzu u govoru ili zastane. Probajte ga pre pravog predavanja. Proba glasa troši par sekundi vašeg Gemini ključa.</p>
+      <p class="note" style="color:var(--warn)">Test od 2. 11. 2026: opšti Gemini model je iz zvuka sale preveo tek oko polovine predavanja, preskakao stihove i kasnio do 20 s. Za predavanje koristite „Google”. Ovaj režim služi samo za probu glasa.</p>
+      <p class="note">Proba glasa troši par sekundi vašeg Gemini ključa.</p>
     </div>
     <div id="phoneVoice">
       <label for="ttsVoice">Glas telefona</label>
@@ -177,7 +178,6 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
       <p class="note" id="ttsNote">Telefon čita srpski tekst prevoda, rečenicu po rečenicu, pa kasni sekundu-dve više od Google-ovog glasa. Google-ov glas se i dalje snima („Prevod (glas)”).</p>
     </div>
     <label class="chk"><input type="checkbox" id="speaker"><span><b>Bez slušalica</b>: glas prevoda ide kroz zvučnik telefona. Dok prevod govori, mikrofon se ne šalje na prevod, da se prevod ne bi vrteo u krug; zato se tada deo govora preskoči. Snimak originala ide i dalje. Za predavanje koristite slušalice i ostavite ovo isključeno.</span></label>
-    <label class="chk"><input type="checkbox" id="boost"><span><b>Pojačanje udaljenog govornika</b> (preporučeno u sali): ujednačava jačinu predavača i uklanja bubnjanje sale. Deluje samo na zvuk za prevod; snimak originala ostaje neobrađen.</span></label>
     <label class="chk"><input type="checkbox" id="proc"><span><b>Telefonska obrada zvuka</b> (kao u pozivu: poništavanje odjeka i šuma). Za predavanje ostavite isključeno, jer ume da seče udaljeni glas. Uključite samo ako je govornik tik uz telefon u bučnoj prostoriji.</span></label>
     <div class="row" style="margin-top:18px"><button class="btn primary" id="saveSettings">Sačuvaj</button></div>
   </div>
@@ -217,7 +217,7 @@ const ROTATE_FORCE = 9.5 * 60 * 1000;
 const $ = s => document.querySelector(s);
 
 /* ---------- podešavanja ---------- */
-const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, proc: false, boost: true, variant: 0,
+const S = Object.assign({ key: '', lang: 'sr', voice: true, speaker: false, showSrc: true, fs: 26, proc: false, variant: 1,
   tts: 'model', ttsVoice: '', ttsRate: 1.05, gVoice: 'Sulafat', gvariant: 0 },
   (() => { try { return JSON.parse(localStorage.getItem('sp.settings')) || {}; } catch { return {}; } })());
 function saveS() { try { localStorage.setItem('sp.settings', JSON.stringify(S)); } catch {} }
@@ -298,7 +298,7 @@ let state = 'idle';          // idle | starting | running | stopping
 let mode = 'translate';      // translate (model za prevod) | gemini (opšti Live model sa izabranim glasom)
 let sess = null, t0 = 0;     // t0 = performance.now() na početku snimanja
 let stream = null, fileEl = null, inCtx = null, outCtx = null, worklet = null;
-let outGain = null, recBus = null, nextT = 0, lastOut = 0;
+let outGain = null, recBus = null, nextT = 0, lastOut = 0, voicedUntil = 0;
 let recOrig = null, recTr = null, wakeLock = null, tickTimer = null;
 let active = null, rotating = false, pending = [], retryN = 0, retryTimer = null, fatal = false;
 let lastLoud = 0, noise = 0.01, wasHidden = false, rotFail = -1e9;
@@ -318,6 +318,8 @@ let srcAll = '';
 class Segmenter {
   constructor(kind) { this.kind = kind; this.cur = null; this.list = []; }
   add(text) {
+    if (!text) return;
+    text = text.replace(/<[^>]{0,20}>|\{[^}]{0,20}\}/g, '');   // oznake modela, npr. <no speech>{pause}
     if (!text) return;
     // ista rečenica poslata ponovo (npr. zbog odjeka): ne dodaj je još jednom
     const norm = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
@@ -464,7 +466,7 @@ class Conn {
     ws.onclose = e => this.closed(e);
   }
   send(b64) {
-    if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ realtimeInput: { audio: { data: b64, mimeType: 'audio/pcm;rate=' + inCtx.sampleRate } } }));
+    if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ realtimeInput: { audio: { data: b64, mimeType: 'audio/pcm;rate=16000' } } }));
   }
   endStream() { try { if (this.ws.readyState === 1) this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } })); } catch {} }
   close() { this.closedByUs = true; try { this.ws.close(1000); } catch {} }
@@ -551,44 +553,47 @@ function connLost(c, code, reason) {
 }
 
 /* ---------- zvuk ---------- */
-// Zvuk za prevodioca: filter bubnjanja (ispod 80 Hz) i blago pojačanje udaljenog govornika.
-// Snimak originala ide mimo ovoga, neobrađen.
+// Zvuk za prevodioca: mikrofon radi na svojoj brzini (obično 48 kHz), a ovde ga sami, kvalitetnim
+// filtrom, svodimo na 16 kHz. Test 2. 11. 2026: Chrome-ovo pretvaranje (AudioContext od 16 kHz) davalo je
+// greške („friends” → „Francuska”, „sanctuary” → „century”), a puni zvuk nijednu. Pojačanje je odbačeno
+// istim testom: model najtačnije prevodi sirov, neobrađen zvuk.
 const WORKLET = `
 class P extends AudioWorkletProcessor {
   constructor(o) {
     super();
     const p = (o && o.processorOptions) || {};
-    this.boost = !!p.boost;
-    this.n = Math.round(sampleRate / 10); this.b = new Int16Array(this.n); this.i = 0;
-    this.a = Math.exp(-2 * Math.PI * 80 / sampleRate); this.px = 0; this.py = 0;
-    this.g = 1; this.L = 0; this.floor = 1;   // šum se nauči iz prvog bloka, nivo govora raste od nule
+    this.out = p.outRate || 16000;
+    this.r = sampleRate / this.out;                    // npr. 48000 / 16000 = 3
+    this.n = Math.round(this.out / 10); this.b = new Int16Array(this.n); this.i = 0;
+    // niskopropusni FIR (prozorski sinc, Blackman), granica 7 kHz: bez preklapanja frekvencija
+    const N = this.r > 1.001 ? 64 : 1; this.N = N; this.h = new Float32Array(N);
+    const fc = Math.min(7000, this.out * 0.45) / sampleRate; let sum = 0;
+    for (let k = 0; k < N; k++) {
+      const m = k - (N - 1) / 2;
+      const si = N === 1 ? 1 : (m === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * m) / (Math.PI * m));
+      const w = N === 1 ? 1 : 0.42 - 0.5 * Math.cos(2 * Math.PI * k / (N - 1)) + 0.08 * Math.cos(4 * Math.PI * k / (N - 1));
+      this.h[k] = si * w; sum += this.h[k];
+    }
+    for (let k = 0; k < N; k++) this.h[k] /= sum;
+    this.hist = new Float32Array(0); this.pos = 0;
+  }
+  push(v) {
+    v = v < -1 ? -1 : v > 1 ? 1 : v;
+    this.b[this.i++] = v < 0 ? v * 32768 : v * 32767;
+    if (this.i === this.n) { this.port.postMessage(this.b.buffer, [this.b.buffer]); this.b = new Int16Array(this.n); this.i = 0; }
   }
   process(inp) {
     const c = inp[0] && inp[0][0];
     if (!c) return true;
-    let gain = 1;
-    if (this.boost) {
-      let s = 0;
-      for (let k = 0; k < c.length; k++) {           // visokopropusni filter, na mestu
-        const y = this.a * (this.py + c[k] - this.px); this.px = c[k]; this.py = y; c[k] = y; s += y * y;
-      }
-      const rms = Math.sqrt(s / c.length);
-      // nivo govora: brzo raste, sporo opada; nivo šuma: najniži nivo, polako se penje
-      this.L = rms > this.L ? this.L * 0.7 + rms * 0.3 : this.L * 0.998 + rms * 0.002;
-      this.floor = rms < this.floor ? rms : this.floor * 1.0005;
-      // pojačavamo samo kad ima govora (iznad šuma), najviše 12 puta, cilj oko -22 dBFS
-      if (this.L > this.floor * 2) {
-        const want = Math.min(12, Math.max(1, 0.08 / Math.max(this.L, 1e-4)));
-        this.g += (want - this.g) * 0.02;
-      }
-      gain = this.g;
+    const x = new Float32Array(this.hist.length + c.length); x.set(this.hist); x.set(c, this.hist.length);
+    const N = this.N, h = this.h;
+    while (this.pos + N + 1 < x.length) {              // izlazni uzorak na razlomljenoj poziciji: filter + linearno
+      const k = Math.floor(this.pos), f = this.pos - k; let a = 0, b = 0;
+      for (let j = 0; j < N; j++) { a += h[j] * x[k + j]; b += h[j] * x[k + j + 1]; }
+      this.push(a + (b - a) * f);
+      this.pos += this.r;
     }
-    for (let k = 0; k < c.length; k++) {
-      let s = c[k] * gain;
-      if (s > 0.9 || s < -0.9) s = Math.tanh(s);     // meko ograničenje, bez pucanja
-      this.b[this.i++] = s < 0 ? s * 32768 : s * 32767;
-      if (this.i === this.n) { this.port.postMessage(this.b.buffer, [this.b.buffer]); this.b = new Int16Array(this.n); this.i = 0; }
-    }
+    const keep = Math.floor(this.pos); this.hist = x.slice(keep); this.pos -= keep;
     return true;
   }
 }
@@ -603,7 +608,7 @@ function onPcm(buf) {
   $('#meter i').style.width = Math.min(100, rms * 400) + '%';
   if (fatal) return;
   // bez slušalica: dok glas prevoda svira kroz zvučnik, modelu šaljemo tišinu, da ne prevodi sopstveni glas
-  const talking = S.tts === 'phone' ? TTS.busy() : (outCtx && nextT > outCtx.currentTime - 0.3);
+  const talking = S.tts === 'phone' ? TTS.busy() : (outCtx && voicedUntil > outCtx.currentTime - 0.3);
   if (S.speaker && S.voice && talking) buf = new ArrayBuffer(buf.byteLength);
   const b64 = b64FromBuf(buf);
   if (active && active.ready) active.send(b64);
@@ -628,7 +633,10 @@ function playPcm(b64) {
   s.playbackRate.value = rate;
   s.connect(outGain); s.connect(recBus);
   s.start(nextT); nextT += buf.duration / rate;
-  lastOut = performance.now();
+  // model za prevod šalje zvuk neprekidno, i tišinu; „govori” samo kad u delu ima glasa
+  const d = buf.getChannelData(0); let q = 0;
+  for (let i = 0; i < d.length; i += 8) q += d[i] * d[i];
+  if (Math.sqrt(q / (d.length / 8)) > 0.01) { voicedUntil = nextT; lastOut = performance.now(); }
 }
 
 async function sourceStream(file) {
@@ -675,7 +683,7 @@ async function start(file) {
   // AudioContext i govor telefona pokrećemo odmah, dok važi dodir korisnika
   TTS.stop();
   if (S.tts === 'phone' && 'speechSynthesis' in window) speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
-  inCtx = new AudioContext({ sampleRate: 16000 });
+  inCtx = new AudioContext();   // izvorna brzina mikrofona; na 16 kHz svodi naš filter
   outCtx = new AudioContext({ sampleRate: 24000 });
   try {
     stream = await sourceStream(file);
@@ -686,7 +694,7 @@ async function start(file) {
   try { await inCtx.resume(); await outCtx.resume(); } catch {}
   await inCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
   const src = inCtx.createMediaStreamSource(stream);
-  worklet = new AudioWorkletNode(inCtx, 'pcm16', { processorOptions: { boost: S.boost && !file } });
+  worklet = new AudioWorkletNode(inCtx, 'pcm16', { processorOptions: { outRate: 16000 } });
   worklet.port.onmessage = e => onPcm(e.data);
   const mute = inCtx.createGain(); mute.gain.value = 0;
   src.connect(worklet); worklet.connect(mute); mute.connect(inCtx.destination);
@@ -694,7 +702,7 @@ async function start(file) {
   outGain = outCtx.createGain(); outGain.gain.value = S.voice && S.tts !== 'phone' ? 1 : 0; outGain.connect(outCtx.destination);
   const dest = outCtx.createMediaStreamDestination();
   recBus = outCtx.createGain(); recBus.connect(dest);
-  nextT = 0;
+  nextT = 0; voicedUntil = 0;
 
   const d = new Date();
   sess = {
@@ -716,7 +724,7 @@ async function start(file) {
   document.body.classList.add('running');
   $('#go').textContent = 'Završi'; $('#go').disabled = false;
   audioMsgs = 0;
-  diagNote('start: ' + navigator.userAgent + ' | inCtx ' + inCtx.sampleRate + ' Hz | ' + JSON.stringify({ mode, tts: S.tts, gVoice: S.gVoice, voice: S.voice, speaker: S.speaker, proc: S.proc, boost: S.boost, lang: S.lang, file: !!file, track: stream.getAudioTracks()[0] && stream.getAudioTracks()[0].getSettings() }));
+  diagNote('start: ' + navigator.userAgent + ' | inCtx ' + inCtx.sampleRate + ' Hz | ' + JSON.stringify({ mode, tts: S.tts, gVoice: S.gVoice, voice: S.voice, speaker: S.speaker, proc: S.proc, lang: S.lang, file: !!file, track: stream.getAudioTracks()[0] && stream.getAudioTracks()[0].getSettings() }));
   if (S.voice && !S.speaker && !file) toast('Glas prevoda slušajte na slušalicama. Bez slušalica uključite „Bez slušalica” u Podešavanjima.', 7000);
   keepAwake();
   connect();
@@ -751,7 +759,7 @@ async function stop() {
   lastOut = Math.max(lastOut, performance.now());
   while (performance.now() < until) {
     if (performance.now() - lastOut > 1500) segDst.end();   // izgovori i poslednji deo rečenice
-    const playing = (outCtx && nextT > outCtx.currentTime) || (TTS.on() && TTS.busy());
+    const playing = (outCtx && voicedUntil > outCtx.currentTime) || (TTS.on() && TTS.busy());
     if (!playing && performance.now() - lastOut > 2500) break;
     await sleep(250);
   }
@@ -850,7 +858,7 @@ $('#fontbtn').onclick = () => { const z = [20, 23, 26, 30, 34, 40]; S.fs = z[(z.
 $('#menubtn').onclick = () => $('#dlgMenu').showModal();
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 function openSettings() {
-  $('#key').value = S.key; $('#lang').value = S.lang; $('#boost').checked = S.boost; $('#proc').checked = S.proc; $('#speaker').checked = S.speaker;
+  $('#key').value = S.key; $('#lang').value = S.lang; $('#proc').checked = S.proc; $('#speaker').checked = S.speaker;
   $('#tts').value = S.tts; $('#ttsRate').value = String(S.ttsRate); fillVoices(); showPhoneVoice();
   $('#gVoice').value = S.gVoice;
   $('#dlgMenu').close(); $('#dlgSettings').showModal();
@@ -860,7 +868,7 @@ $('#showKey').onclick = () => { const k = $('#key'); k.type = k.type === 'passwo
 $('#saveSettings').onclick = () => {
   const k = $('#key').value.trim();
   if (k !== S.key) S.variant = 0;
-  S.key = k; S.lang = $('#lang').value; S.boost = $('#boost').checked; S.proc = $('#proc').checked; S.speaker = $('#speaker').checked;
+  S.key = k; S.lang = $('#lang').value; S.proc = $('#proc').checked; S.speaker = $('#speaker').checked;
   S.tts = $('#tts').value; S.ttsVoice = $('#ttsVoice').value; S.ttsRate = parseFloat($('#ttsRate').value) || 1.05;
   S.gVoice = $('#gVoice').value || 'Sulafat';
   saveS(); applyUI();
