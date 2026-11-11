@@ -81,6 +81,10 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 .sess .meta{font-size:13px;color:var(--muted);margin-bottom:10px}
 .sess .acts{display:flex;flex-wrap:wrap;gap:8px}
 .sess .acts .btn{font-size:14px;padding:8px 10px}
+.miclive{margin:16px 0 8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.micnow{font-size:18px;font-weight:600;margin:4px 0 10px;word-break:break-word}
+.bigmeter{height:20px;border-radius:10px;background:var(--panel2);overflow:hidden}
+.bigmeter i{display:block;height:100%;width:0;background:var(--ok)}
 #toast{position:fixed;left:16px;right:16px;bottom:100px;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
 #toast div{background:#000c;border:1px solid var(--line);padding:10px 14px;border-radius:10px;font-size:14px;max-width:560px;text-align:center}
 </style>
@@ -101,7 +105,9 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     Sve se istovremeno snima: <b>originalni zvuk</b>, <b>glas prevoda</b> i <b>tekst</b> (sa vremenom).
     Snimke preuzimate posle u meniju <b>Snimci</b>.<br><br>
     Ekran ostaje upaljen dok traje prevod. Ne zaključavajte telefon i ne prelazite u drugu aplikaciju.<br><br>
-    <span style="font-size:13px">Verzija 9</span>
+    <button class="btn primary" id="micSetupBtn">🎙 Podesi i proveri mikrofon</button>
+    <div class="note" id="micInfo" style="margin-top:8px"></div><br>
+    <span style="font-size:13px">Verzija 10</span>
   </div>
   <div id="segs"></div>
 </main>
@@ -119,10 +125,11 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 </footer>
 
 <dialog id="dlgMenu">
-  <div class="dh"><h2>Meni <span class="note">· verzija 9</span></h2><button data-close>×</button></div>
+  <div class="dh"><h2>Meni <span class="note">· verzija 10</span></h2><button data-close>×</button></div>
   <div class="db">
     <div class="row" style="flex-wrap:wrap">
       <button class="btn primary" id="openRecs">Snimci</button>
+      <button class="btn" id="openMic">🎙 Mikrofon</button>
       <button class="btn" id="openSettings">Podešavanja</button>
       <button class="btn" id="openFile">Prevedi snimak iz fajla</button>
     </div>
@@ -177,13 +184,29 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
       <div class="row" style="margin-top:10px"><button class="btn" id="ttsTest">▶ Probaj glas</button></div>
       <p class="note" id="ttsNote">Telefon čita srpski tekst prevoda, rečenicu po rečenicu, pa kasni sekundu-dve više od Google-ovog glasa. Google-ov glas se i dalje snima („Prevod (glas)”).</p>
     </div>
-    <label for="mic">Mikrofon</label>
-    <select id="mic"></select>
-    <div class="row" style="margin-top:8px"><button class="btn" id="micRefresh">Osveži spisak mikrofona</button></div>
-    <p class="note" id="micNote">Spoljni mikrofon (npr. prijemnik RØDE Wireless GO II na USB-C) priključite pre otvaranja aplikacije, pa pritisnite „Osveži spisak”. Ako ga nema na spisku, telefon ga i dalje može koristiti sam: pri pokretanju piše koji mikrofon radi.</p>
+    <label>Mikrofon</label>
+    <div class="row"><button class="btn" id="settingsMic">🎙 Podesi i proveri mikrofon</button></div>
     <label class="chk"><input type="checkbox" id="speaker"><span><b>Bez slušalica</b>: glas prevoda ide kroz zvučnik telefona. Dok prevod govori, mikrofon se ne šalje na prevod, da se prevod ne bi vrteo u krug; zato se tada deo govora preskoči. Snimak originala ide i dalje. Za predavanje koristite slušalice i ostavite ovo isključeno.</span></label>
     <label class="chk"><input type="checkbox" id="proc"><span><b>Telefonska obrada zvuka</b> (kao u pozivu: poništavanje odjeka i šuma). Za predavanje ostavite isključeno, jer ume da seče udaljeni glas. Uključite samo ako je govornik tik uz telefon u bučnoj prostoriji.</span></label>
     <div class="row" style="margin-top:18px"><button class="btn primary" id="saveSettings">Sačuvaj</button></div>
+  </div>
+</dialog>
+
+<dialog id="dlgMic">
+  <div class="dh"><h2>Mikrofon</h2><button data-close>×</button></div>
+  <div class="db">
+    <label for="micSel">Izaberite mikrofon</label>
+    <select id="micSel"></select>
+    <div class="row" style="margin-top:8px"><button class="btn" id="micRescan">Osveži spisak</button></div>
+    <div class="miclive">
+      <div class="note">Sada stvarno radi:</div>
+      <div id="micNow" class="micnow">…</div>
+      <div class="bigmeter"><i id="micBar"></i></div>
+      <div id="micWarn" class="note" style="margin-top:8px"></div>
+    </div>
+    <p class="note"><b>Proba:</b> kucnite prstom po kockici (RØDE): traka treba da skoči. Kucnite po donjoj ivici telefona: traka treba da miruje. Ako je obrnuto, radi mikrofon telefona, pa izaberite drugi sa spiska.</p>
+    <p class="note">Spoljni mikrofon priključite pre otvaranja ovog ekrana. Bluetooth slušalice zbog probe isključite, jer Chrome ume da uzme njihov mikrofon.</p>
+    <div class="row" style="margin-top:12px"><button class="btn primary" id="micSave">Koristi ovaj mikrofon</button></div>
   </div>
 </dialog>
 
@@ -887,7 +910,6 @@ function openSettings() {
   $('#key').value = S.key; $('#lang').value = S.lang; $('#proc').checked = S.proc; $('#speaker').checked = S.speaker;
   $('#tts').value = S.tts; $('#ttsRate').value = String(S.ttsRate); fillVoices(); showPhoneVoice();
   $('#gVoice').value = S.gVoice;
-  fillMics();
   $('#dlgMenu').close(); $('#dlgSettings').showModal();
 }
 $('#openSettings').onclick = openSettings;
@@ -895,7 +917,6 @@ $('#showKey').onclick = () => { const k = $('#key'); k.type = k.type === 'passwo
 $('#saveSettings').onclick = () => {
   const k = $('#key').value.trim();
   S.key = k; S.lang = $('#lang').value; S.proc = $('#proc').checked; S.speaker = $('#speaker').checked;
-  S.mic = $('#mic').value; S.micLabel = S.mic ? $('#mic').selectedOptions[0].textContent : '';
   S.tts = $('#tts').value; S.ttsVoice = $('#ttsVoice').value; S.ttsRate = parseFloat($('#ttsRate').value) || 1.05;
   S.gVoice = $('#gVoice').value || 'Sulafat';
   saveS(); applyUI();
@@ -917,27 +938,84 @@ function fillVoices() {
   $('#noVoice') && $('#noVoice').remove();
   if (!vs.length) $('#ttsNote').insertAdjacentHTML('beforebegin', '<p class="note" id="noVoice" style="color:var(--warn)">Telefon nema srpski glas. Podešavanja telefona → Opšte upravljanje → Pretvaranje teksta u govor: izaberite Google kao mašinu, pa u njenim podešavanjima instalirajte srpski (Install voice data → Srpski). Zatim ponovo otvorite aplikaciju.</p>');
 }
-async function fillMics() {
-  const sel = $('#mic'); sel.innerHTML = '<option value="">Automatski (telefon bira)</option>';
+/* ---------- ekran „Mikrofon”: izbor i proba pre početka ---------- */
+async function fillMics(value) {
+  const sel = $('#micSel'); sel.innerHTML = '<option value="">Automatski (telefon bira)</option>';
   let ds = [];
   try { ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default'); } catch {}
   for (const d of ds) {
     const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || 'Mikrofon ' + (sel.options.length);
     sel.appendChild(o);
   }
-  if (S.mic && ![...sel.options].some(o => o.value === S.mic)) {
-    const o = document.createElement('option'); o.value = S.mic; o.textContent = (S.micLabel || 'Izabrani mikrofon') + ' (nije priključen)'; sel.appendChild(o);
+  if (value && ![...sel.options].some(o => o.value === value)) {
+    const o = document.createElement('option'); o.value = value; o.textContent = (S.micLabel || 'Izabrani mikrofon') + ' (nije priključen)'; sel.appendChild(o);
   }
-  sel.value = S.mic || '';
+  sel.value = value || '';
   return ds;
 }
-$('#micRefresh').onclick = async () => {
-  // nazivi mikrofona se vide tek kad je mikrofon dozvoljen
-  try { const st = await navigator.mediaDevices.getUserMedia({ audio: true }); st.getTracks().forEach(t => t.stop()); }
-  catch (e) { return toast('Mikrofon nije dozvoljen: ' + e.message); }
-  const ds = await fillMics();
-  toast('Pronađeno mikrofona: ' + ds.length, 3000);
+let mtest = { stream: null, ctx: null, raf: 0, n: 0 };
+function micTestStop() {
+  clearInterval(mtest.raf);
+  if (mtest.stream) mtest.stream.getTracks().forEach(t => t.stop());
+  if (mtest.ctx) mtest.ctx.close().catch(() => {});
+  mtest = { stream: null, ctx: null, raf: 0, n: mtest.n };
+  $('#micBar').style.width = '0';
+}
+async function micTestStart(id) {
+  micTestStop();
+  const run = ++mtest.n;   // ako korisnik brzo menja izbor, važi samo poslednji
+  const warn = [], audio = { channelCount: 1, echoCancellation: S.proc, noiseSuppression: S.proc, autoGainControl: S.proc };
+  $('#micNow').textContent = '…'; $('#micWarn').textContent = '';
+  let st = null;
+  if (id) {
+    try { st = await navigator.mediaDevices.getUserMedia({ audio: Object.assign({ deviceId: { exact: id } }, audio) }); }
+    catch (e) { warn.push('Izabrani mikrofon nije dostupan (' + e.name + '). Proverite kabl i da li je uključen.'); }
+  }
+  if (!st) {
+    try { st = await navigator.mediaDevices.getUserMedia({ audio }); }
+    catch (e) { $('#micNow').textContent = 'Mikrofon nije dozvoljen'; $('#micWarn').textContent = e.message; return; }
+  }
+  if (run !== mtest.n) { st.getTracks().forEach(t => t.stop()); return; }
+  mtest.stream = st;
+  await fillMics(id);                       // nazivi se vide tek kad je mikrofon dozvoljen
+  const tr = st.getAudioTracks()[0], label = tr.label || 'mikrofon telefona', got = tr.getSettings().deviceId;
+  $('#micNow').textContent = label;
+  if (id && got && got !== id) warn.push('Telefon nije uzeo izabrani mikrofon, nego ovaj iznad.');
+  if (/bluetooth/i.test(label)) warn.push('Ovo je mikrofon Bluetooth slušalica: kvalitet telefonskog poziva, lošiji za prevod.');
+  $('#micWarn').textContent = warn.join(' '); $('#micWarn').style.color = warn.length ? 'var(--warn)' : '';
+  tr.onended = () => { $('#micWarn').textContent = 'Mikrofon se isključio. Proverite kabl, pa „Osveži spisak”.'; $('#micWarn').style.color = 'var(--warn)'; };
+  // traka jačine uživo (od -60 dB do 0 dB)
+  mtest.ctx = new AudioContext();
+  const an = mtest.ctx.createAnalyser(); an.fftSize = 1024;
+  mtest.ctx.createMediaStreamSource(st).connect(an);
+  const buf = new Float32Array(an.fftSize); let shown = 0;
+  mtest.raf = setInterval(() => {
+    an.getFloatTimeDomainData(buf); let pk = 0;
+    for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > pk) pk = a; }
+    const pct = Math.max(0, Math.min(100, (20 * Math.log10(pk + 1e-9) + 60) / 60 * 100));
+    shown = Math.max(pct, shown * 0.88);    // vrh se zadrži i polako spušta, da se kucanje vidi
+    $('#micBar').style.width = shown + '%';
+  }, 40);
+}
+function showMicInfo() { $('#micInfo').textContent = 'Mikrofon: ' + (S.mic ? S.micLabel : 'automatski (telefon bira)'); }
+function openMic() {
+  if (state !== 'idle') return toast('Mikrofon se podešava pre početka. Prvo pritisnite Završi.');
+  $('#dlgMenu').close(); $('#dlgSettings').close();
+  $('#dlgMic').showModal();
+  micTestStart(S.mic);
+}
+$('#micSetupBtn').onclick = openMic;
+$('#openMic').onclick = openMic;
+$('#settingsMic').onclick = openMic;
+$('#micSel').onchange = () => micTestStart($('#micSel').value);
+$('#micRescan').onclick = () => micTestStart($('#micSel').value);
+$('#micSave').onclick = () => {
+  S.mic = $('#micSel').value; S.micLabel = S.mic ? $('#micSel').selectedOptions[0].textContent.replace(/ \(nije priključen\)$/, '') : '';
+  saveS(); $('#dlgMic').close(); showMicInfo();
+  toast('Mikrofon: ' + (S.mic ? S.micLabel : 'automatski'), 2500);
 };
+$('#dlgMic').addEventListener('close', micTestStop);
+showMicInfo();
 function showPhoneVoice() {
   $('#phoneVoice').style.display = $('#tts').value === 'phone' ? '' : 'none';
   $('#geminiVoice').style.display = $('#tts').value === 'gemini' ? '' : 'none';
