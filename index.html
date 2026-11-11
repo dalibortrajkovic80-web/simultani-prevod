@@ -101,7 +101,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
     Sve se istovremeno snima: <b>originalni zvuk</b>, <b>glas prevoda</b> i <b>tekst</b> (sa vremenom).
     Snimke preuzimate posle u meniju <b>Snimci</b>.<br><br>
     Ekran ostaje upaljen dok traje prevod. Ne zaključavajte telefon i ne prelazite u drugu aplikaciju.<br><br>
-    <span style="font-size:13px">Verzija 8 (izbor mikrofona)</span>
+    <span style="font-size:13px">Verzija 9</span>
   </div>
   <div id="segs"></div>
 </main>
@@ -119,7 +119,7 @@ input[type=password],input[type=text],select{width:100%;padding:12px;border-radi
 </footer>
 
 <dialog id="dlgMenu">
-  <div class="dh"><h2>Meni <span class="note">· verzija 8</span></h2><button data-close>×</button></div>
+  <div class="dh"><h2>Meni <span class="note">· verzija 9</span></h2><button data-close>×</button></div>
   <div class="db">
     <div class="row" style="flex-wrap:wrap">
       <button class="btn primary" id="openRecs">Snimci</button>
@@ -427,8 +427,14 @@ function diag(j) {
     if (c.modelTurn) c.modelTurn = '[zvuk ×' + audio + ']';
     rest.serverContent = c;
   }
-  const keys = Object.keys(rest.serverContent || {});
-  if (keys.length === 1 && keys[0] === 'modelTurn' && Object.keys(rest).length === 1) return;  // samo zvuk
+  // izostavi poruke bez sadržaja: samo zvuk, prazne i one za nastavak veze (stižu svake sekunde)
+  delete rest.sessionResumptionUpdate;
+  if (rest.serverContent) {
+    const c = rest.serverContent; delete c.modelTurn;
+    for (const k of ['inputTranscription', 'outputTranscription']) if (c[k] && !c[k].text) delete c[k];
+    if (!Object.keys(c).length) delete rest.serverContent;
+  }
+  if (!Object.keys(rest).length) return;
   diagNote(JSON.stringify(rest) + ' (zvučnih poruka do sada: ' + audioMsgs + ')');
 }
 
@@ -737,6 +743,7 @@ async function start(file) {
   if (mt && !file) {
     toast('Mikrofon: ' + (mt.label || 'mikrofon telefona'), 6000);
     diagNote('mikrofon: ' + mt.label);
+    if (/bluetooth/i.test(mt.label)) toast('Pažnja: zvuk se uzima sa mikrofona Bluetooth slušalica, ne sa RØDE-a ni telefona. Taj mikrofon je kao za telefonski poziv i lošiji je za prevod.', 12000);
     // bežični ili USB mikrofon može da se isključi usred predavanja: upozori odmah
     mt.onended = () => {
       if (state !== 'running') return;
